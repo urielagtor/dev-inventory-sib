@@ -1510,18 +1510,19 @@ def _reservation_create_ui(
                     st.rerun()
             with coly:
                 remove_idx = st.number_input(
-                    "Remove line # (1..n)",
-                    min_value=1,
-                    step=1,
-                    value=1,
-                    max_value=len(st.session_state[cart_key]),
-                    key=f"{session_prefix}_res_remove_idx"
-                предупреждение = False
-                if st.button("Remove line", use_container_width=True, key=f"{session_prefix}_res_remove_btn"):
-                    idx = int(remove_idx) - 1
-                    if 0 <= idx < len(st.session_state[cart_key]):
-                        st.session_state[cart_key].pop(idx)
-                        st.rerun()
+        "Remove line # (1..n)",
+        min_value=1,
+        step=1,
+        value=1,
+        max_value=len(st.session_state[cart_key]),
+        key=f"{session_prefix}_res_remove_idx"
+    )
+    if st.button("Remove line", use_container_width=True, key=f"{session_prefix}_res_remove_btn"):
+        idx = int(remove_idx) - 1
+        if 0 <= idx < len(st.session_state[cart_key]):
+            st.session_state[cart_key].pop(idx)
+            st.rerun()
+
 
         st.divider()
         notes = st.text_area("Notes (optional)", key=f"{session_prefix}_res_notes")
