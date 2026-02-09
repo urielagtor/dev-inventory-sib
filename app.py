@@ -17,6 +17,10 @@ from reportlab.lib.styles import getSampleStyleSheet
 APP_TITLE = "SIB Inventory Supply Checkout System!"
 DB_PATH = "inventory_checkout.db"
 
+# Public (guest) reservations will be attributed to this DB user
+PUBLIC_USERNAME = "public"
+PUBLIC_ROLE = "guest"
+
 # ---------------------------
 # Security / Password hashing
 # ---------------------------
@@ -75,10 +79,6 @@ def reset_admin_password_to_default():
 # PDF helpers
 # ---------------------------
 def build_table_pdf(title: str, subtitle_lines: list[str], table_data, col_widths=None) -> bytes:
-    """
-    table_data should be a list of rows (including header row),
-    where cells can be strings or ReportLab Paragraphs.
-    """
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
     styles = getSampleStyleSheet()
@@ -118,10 +118,6 @@ def build_table_pdf(title: str, subtitle_lines: list[str], table_data, col_width
     return pdf_bytes
 
 def build_ticket_pdf(checkout_id: int) -> bytes:
-    """
-    Printable PDF for ANY ticket (open or closed),
-    includes return log per line.
-    """
     styles = getSampleStyleSheet()
 
     header = fetch_one("""
@@ -146,7 +142,6 @@ def build_ticket_pdf(checkout_id: int) -> bytes:
             [["Message"], ["Ticket not found."]]
         )
 
-    # Lines (include returned/outstanding)
     lines = fetch_all("""
         SELECT
             cl.id AS line_id,
@@ -160,7 +155,6 @@ def build_ticket_pdf(checkout_id: int) -> bytes:
         ORDER BY i.name ASC
     """, (checkout_id,))
 
-    # Return events (audit log)
     events = fetch_all("""
         SELECT
             re.line_id,
@@ -173,7 +167,6 @@ def build_ticket_pdf(checkout_id: int) -> bytes:
         ORDER BY re.returned_at ASC, re.id ASC
     """, (checkout_id,))
 
-    # Map line_id -> list of "when by who: qty"
     ev_map = {}
     for e in events:
         lid = int(e["line_id"])
@@ -192,7 +185,6 @@ def build_ticket_pdf(checkout_id: int) -> bytes:
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
     ]
 
-    # Build table rows with wrapped "Return Log"
     table_data = [[
         "Item", "Qty Out", "Returned", "Outstanding", "Return Log (who/when/qty)"
     ]]
@@ -209,16 +201,10 @@ def build_ticket_pdf(checkout_id: int) -> bytes:
             Paragraph(log_text, styles["Normal"]),
         ])
 
-    # column widths tuned for letter page
     col_widths = [140, 45, 50, 60, 200]
-
     return build_table_pdf("SIB Supply Checkout System", subtitle, table_data, col_widths=col_widths)
 
 def build_checkout_receipt_pdf(checkout_id: int) -> bytes:
-    """
-    Keep this for the "Checkout Receipt" button — uses ticket PDF format,
-    but it’ll naturally show empty return logs initially.
-    """
     return build_ticket_pdf(checkout_id)
 
 # ---------------------------
@@ -243,6 +229,25 @@ def get_conn():
     conn.row_factory = sqlite3.Row
     return conn
 
+APP_TZ = ZoneInfo("America/Los_Angeles")
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+def to_local_display(dt_str: str) -> str:
+    if not dt_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(dt_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(APP_TZ).strftime("%Y-%m-%d %I:%M %p")
+    except Exception:
+        return str(dt_str)
+
+def local_returned_at_iso(d: date) -> str:
+    local_dt = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=APP_TZ)
+    return local_dt.astimezone(timezone.utc).isoformat()
 
 def init_db():
     conn = get_conn()
@@ -311,7 +316,6 @@ def init_db():
         )
     """)
 
-    # ✅ Audit log of check-ins (who, when, qty) per line
     cur.execute("""
         CREATE TABLE IF NOT EXISTS return_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -326,9 +330,8 @@ def init_db():
             FOREIGN KEY(returned_by) REFERENCES users(id)
         )
     """)
-        # ---------------------------
-    # Reservations (staging queue)
-    # ---------------------------
+
+    # Reservations
     cur.execute("""
         CREATE TABLE IF NOT EXISTS reservations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -337,19 +340,19 @@ def init_db():
             borrower_email TEXT NOT NULL,
             borrower_group TEXT NOT NULL,
 
-            est_checkout_date TEXT NOT NULL,          -- YYYY-MM-DD
-            est_checkout_time TEXT,                   -- optional, store as "HH:MM"
-            expected_return_date TEXT NOT NULL,       -- "Check-In Date" (expected return)
+            est_checkout_date TEXT NOT NULL,
+            est_checkout_time TEXT,
+            expected_return_date TEXT NOT NULL,
 
-            status TEXT NOT NULL DEFAULT 'waiting',   -- waiting | ready | converted
+            status TEXT NOT NULL DEFAULT 'waiting',
             notes TEXT,
 
             created_by INTEGER NOT NULL,
             created_at TEXT NOT NULL,
 
-            actual_checkout_date TEXT,                -- set when converted
-            actual_checkout_time TEXT,                -- optional
-            checkout_id INTEGER,                      -- link to real checkout ticket
+            actual_checkout_date TEXT,
+            actual_checkout_time TEXT,
+            checkout_id INTEGER,
 
             FOREIGN KEY(created_by) REFERENCES users(id),
             FOREIGN KEY(checkout_id) REFERENCES checkouts(id)
@@ -379,6 +382,17 @@ def init_db():
             INSERT INTO users (username, password_hash, role, active, created_at)
             VALUES (?, ?, 'admin', 1, ?)
         """, (default_user, hash_password(default_pass), now_iso()))
+        conn.commit()
+
+    # Ensure PUBLIC user exists for guest reservations
+    cur.execute("SELECT id FROM users WHERE username=?", (PUBLIC_USERNAME,))
+    row = cur.fetchone()
+    if not row:
+        # random password; guests will never log in as this user
+        cur.execute("""
+            INSERT INTO users (username, password_hash, role, active, created_at)
+            VALUES (?, ?, ?, 1, ?)
+        """, (PUBLIC_USERNAME, hash_password(secrets.token_hex(16)), PUBLIC_ROLE, now_iso()))
         conn.commit()
 
     conn.close()
@@ -426,33 +440,9 @@ def require_login():
         st.warning("Please log in to continue.")
         st.stop()
 
-from zoneinfo import ZoneInfo
-from datetime import date, datetime, timezone
-
-APP_TZ = ZoneInfo("America/Los_Angeles")
-
-def now_iso():
-    # Store all timestamps in UTC
-    return datetime.now(timezone.utc).isoformat()
-
-def to_local_display(dt_str: str) -> str:
-    if not dt_str:
-        return ""
-    try:
-        dt = datetime.fromisoformat(dt_str)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(APP_TZ).strftime("%Y-%m-%d %I:%M %p")
-    except Exception:
-        return str(dt_str)
-
-def local_returned_at_iso(d: date) -> str:
-    # Midnight in America/Los_Angeles -> converted to UTC for storage
-    local_dt = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=APP_TZ)
-    return local_dt.astimezone(timezone.utc).isoformat()
-
-
-
+def get_public_user_id() -> int:
+    row = fetch_one("SELECT id FROM users WHERE username=?", (PUBLIC_USERNAME,))
+    return int(row["id"]) if row else 1
 
 # ---------------------------
 # Inventory availability math
@@ -558,7 +548,7 @@ def get_reservation_lines(reservation_id: int):
 # ---------------------------
 def page_login():
     st.title(APP_TITLE)
-    st.subheader("Login")
+    st.subheader("Staff Login")
 
     with st.form("login_form"):
         username = st.text_input("Username")
@@ -1101,7 +1091,6 @@ def page_currently_checked_out():
                 })
             st.dataframe(ldf, use_container_width=True, hide_index=True)
 
-            # Optional: print open ticket from here too
             pdf_bytes = build_ticket_pdf(ticket_id)
             st.download_button(
                 "Download / Print Ticket (PDF)",
@@ -1170,7 +1159,6 @@ def page_checkin():
 
     if header["actual_return_date"]:
         st.info(f"Ticket #{ticket_id} is already CLOSED (Actual return: {header['actual_return_date']}).")
-        # Still allow printing closed ticket
         pdf_bytes = build_ticket_pdf(ticket_id)
         st.download_button(
             "Download / Print Ticket (PDF)",
@@ -1272,7 +1260,6 @@ def page_checkin():
 
         returned_at_iso = local_returned_at_iso(actual_return)
 
-        # ✅ Update returned_qty AND write return_events for audit ("who checked in and when")
         for return_now, line_id in updates:
             execute("""
                 UPDATE checkout_lines
@@ -1303,7 +1290,6 @@ def page_checkin():
         else:
             st.success(f"Return processed. Ticket #{ticket_id} remains OPEN — {remain_qty} still outstanding.")
 
-        # Offer a fresh PDF immediately after return
         pdf_bytes = build_ticket_pdf(ticket_id)
         st.download_button(
             "Download / Print Updated Ticket (PDF)",
@@ -1393,12 +1379,215 @@ def page_logout():
     st.session_state.clear()
     st.success("Logged out.")
     st.rerun()
-def page_reservations():
+
+# ---------------------------
+# Reservations (split: guest create vs staff manage)
+# ---------------------------
+def _reservation_create_ui(
+    *,
+    show_inventory_counts: bool,
+    created_by_user_id: int,
+    session_prefix: str,
+):
+    """
+    Shared reservation creation UI.
+    - show_inventory_counts: False for guests
+    - created_by_user_id: public user id for guests; real user id for staff
+    - session_prefix: unique prefix so guest/staff don't conflict in session_state keys
+    """
+    items = fetch_all("SELECT id, name, total_qty FROM items ORDER BY name ASC")
+    if not items:
+        st.info("No items found. Add items first.")
+        return
+
+    outstanding = get_outstanding_by_item()
+
+    item_options = []
+    for it in items:
+        if show_inventory_counts:
+            out = int(outstanding.get(it["id"], 0))
+            total = int(it["total_qty"])
+            avail = max(total - out, 0)
+            label = f"{it['name']} (available now: {avail} / total: {total})"
+        else:
+            label = f"{it['name']}"
+        item_options.append((it["id"], label))
+
+    cart_key = f"{session_prefix}_res_cart"
+    if cart_key not in st.session_state:
+        st.session_state[cart_key] = []
+
+    with st.expander("1) Create reservation", expanded=True):
+        colA, colB = st.columns(2, gap="large")
+
+        with colA:
+            r_name = st.text_input("Name", key=f"{session_prefix}_res_name")
+            r_email = st.text_input("Email", key=f"{session_prefix}_res_email")
+            r_group = st.text_input("Group / organization", key=f"{session_prefix}_res_group")
+
+        with colB:
+            est_checkout_date = st.date_input(
+                "Check-Out Date (estimated)",
+                value=date.today(),
+                key=f"{session_prefix}_res_est_checkout_date"
+            )
+
+            specify_time = st.checkbox(
+                "Specify estimated check-out time (optional)",
+                value=False,
+                key=f"{session_prefix}_res_specify_time"
+            )
+            est_time_str = None
+            if specify_time:
+                t = st.time_input(
+                    "Estimated Check Out Time",
+                    value=datetime.now().time().replace(second=0, microsecond=0),
+                    key=f"{session_prefix}_res_est_time"
+                )
+                est_time_str = t.strftime("%H:%M")
+
+            expected_return_date = st.date_input(
+                "Check-In Date (expected return)",
+                value=date.today(),
+                key=f"{session_prefix}_res_expected_return_date"
+            )
+
+        st.divider()
+        if show_inventory_counts:
+            st.caption("Add items to the reservation cart (availability is shown as a reference only).")
+        else:
+            st.caption("Add items to the reservation cart.")
+
+        col1, col2, col3 = st.columns([3, 1, 1], gap="large")
+        id_list = [x[0] for x in item_options]
+        label_map = {x[0]: x[1] for x in item_options}
+
+        with col1:
+            selected_item_id = st.selectbox(
+                "Item",
+                options=id_list,
+                format_func=lambda i: label_map[i],
+                key=f"{session_prefix}_res_selected_item_id"
+            )
+        with col2:
+            qty = st.number_input(
+                "Qty",
+                min_value=1,
+                step=1,
+                value=1,
+                key=f"{session_prefix}_res_selected_qty"
+            )
+        with col3:
+            add = st.button("Add to reservation cart", use_container_width=True, key=f"{session_prefix}_res_add_btn")
+
+        if add:
+            found = False
+            for line in st.session_state[cart_key]:
+                if line["item_id"] == selected_item_id:
+                    line["qty"] = int(line["qty"]) + int(qty)
+                    found = True
+                    break
+            if not found:
+                st.session_state[cart_key].append({
+                    "item_id": selected_item_id,
+                    "item_label": label_map[selected_item_id],
+                    "qty": int(qty),
+                })
+            st.success("Added to reservation cart.")
+            st.rerun()
+
+        st.subheader("Reservation cart")
+        if not st.session_state[cart_key]:
+            st.info("Cart is empty.")
+        else:
+            cart_df = pd.DataFrame([{"item": c["item_label"], "qty": c["qty"]} for c in st.session_state[cart_key]])
+            st.dataframe(cart_df, use_container_width=True, hide_index=True)
+
+            colx, coly = st.columns([1, 1], gap="large")
+            with colx:
+                if st.button("Clear reservation cart", use_container_width=True, key=f"{session_prefix}_res_clear_cart"):
+                    st.session_state[cart_key] = []
+                    st.rerun()
+            with coly:
+                remove_idx = st.number_input(
+                    "Remove line # (1..n)",
+                    min_value=1,
+                    step=1,
+                    value=1,
+                    max_value=len(st.session_state[cart_key]),
+                    key=f"{session_prefix}_res_remove_idx"
+                предупреждение = False
+                if st.button("Remove line", use_container_width=True, key=f"{session_prefix}_res_remove_btn"):
+                    idx = int(remove_idx) - 1
+                    if 0 <= idx < len(st.session_state[cart_key]):
+                        st.session_state[cart_key].pop(idx)
+                        st.rerun()
+
+        st.divider()
+        notes = st.text_area("Notes (optional)", key=f"{session_prefix}_res_notes")
+
+        if st.button("Create reservation", type="primary", use_container_width=True, key=f"{session_prefix}_res_create_btn"):
+            if not r_name.strip():
+                st.error("Name is required.")
+                return
+            if not r_email.strip():
+                st.error("Email is required.")
+                return
+            if not r_group.strip():
+                st.error("Group/organization is required.")
+                return
+            if expected_return_date < est_checkout_date:
+                st.error("Check-In Date cannot be before Check-Out Date.")
+                return
+            if not st.session_state[cart_key]:
+                st.error("Add at least one item to the reservation cart.")
+                return
+
+            reservation_id = execute("""
+                INSERT INTO reservations (
+                    borrower_name, borrower_email, borrower_group,
+                    est_checkout_date, est_checkout_time, expected_return_date,
+                    status, notes,
+                    created_by, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?)
+            """, (
+                r_name.strip(),
+                r_email.strip(),
+                r_group.strip(),
+                est_checkout_date.isoformat(),
+                est_time_str,
+                expected_return_date.isoformat(),
+                notes.strip() or None,
+                int(created_by_user_id),
+                now_iso()
+            ))
+
+            params = []
+            for c in st.session_state[cart_key]:
+                params.append((reservation_id, c["item_id"], int(c["qty"])))
+            execute_many("""
+                INSERT INTO reservation_lines (reservation_id, item_id, qty)
+                VALUES (?, ?, ?)
+            """, params)
+
+            st.session_state[cart_key] = []
+            st.success(f"Reservation created (Reservation #: {reservation_id}).")
+            st.rerun()
+
+def page_make_reservation_guest():
+    st.header("Make a Reservation")
+    st.caption("Guests can create reservations here. Staff will review the queue and confirm availability.")
+    _reservation_create_ui(
+        show_inventory_counts=False,
+        created_by_user_id=get_public_user_id(),
+        session_prefix="guest"
+    )
+
+def page_reservations_staff():
     require_login()
     st.header("Reservations (Staging Queue)")
     st.caption("Reservations do NOT reduce inventory. Convert to a real checkout when ready for pickup.")
 
-    # For success flow (like checkout receipts)
     if "last_converted_reservation" not in st.session_state:
         st.session_state.last_converted_reservation = None
 
@@ -1420,160 +1609,17 @@ def page_reservations():
 
         st.divider()
 
-    # ---------------------------------
-    # Create a reservation (manual entry)
-    # ---------------------------------
-    items = fetch_all("SELECT id, name, total_qty FROM items ORDER BY name ASC")
-    if not items:
-        st.info("No items found. Add items first.")
-        return
-
-    outstanding = get_outstanding_by_item()
-
-    item_options = []
-    for it in items:
-        out = int(outstanding.get(it["id"], 0))
-        total = int(it["total_qty"])
-        avail = max(total - out, 0)
-        label = f"{it['name']} (available now: {avail} / total: {total})"
-        item_options.append((it["id"], label, avail))
-
-    if "res_cart" not in st.session_state:
-        st.session_state.res_cart = []
-
-    with st.expander("1) Create reservation (manual staging entry)", expanded=True):
-        colA, colB = st.columns(2, gap="large")
-
-        with colA:
-            r_name = st.text_input("Name", key="res_name")
-            r_email = st.text_input("Email", key="res_email")
-            r_group = st.text_input("Group / organization", key="res_group")
-
-        with colB:
-            est_checkout_date = st.date_input("Check-Out Date (estimated)", value=date.today(), key="res_est_checkout_date")
-
-            specify_time = st.checkbox("Specify estimated check-out time (optional)", value=False, key="res_specify_time")
-            est_time_str = None
-            if specify_time:
-                t = st.time_input("Estimated Check Out Time", value=datetime.now().time().replace(second=0, microsecond=0), key="res_est_time")
-                est_time_str = t.strftime("%H:%M")
-
-            expected_return_date = st.date_input("Check-In Date (expected return)", value=date.today(), key="res_expected_return_date")
-
-        st.divider()
-        st.caption("Add items to the reservation cart (availability is shown as a reference only).")
-
-        col1, col2, col3 = st.columns([3, 1, 1], gap="large")
-        id_list = [x[0] for x in item_options]
-        label_map = {x[0]: x[1] for x in item_options}
-
-        with col1:
-            selected_item_id = st.selectbox(
-                "Item",
-                options=id_list,
-                format_func=lambda i: label_map[i],
-                key="res_selected_item_id"
-            )
-        with col2:
-            qty = st.number_input("Qty", min_value=1, step=1, value=1, key="res_selected_qty")
-        with col3:
-            add = st.button("Add to reservation cart", use_container_width=True)
-
-        if add:
-            found = False
-            for line in st.session_state.res_cart:
-                if line["item_id"] == selected_item_id:
-                    line["qty"] = int(line["qty"]) + int(qty)
-                    found = True
-                    break
-            if not found:
-                st.session_state.res_cart.append({
-                    "item_id": selected_item_id,
-                    "item_label": label_map[selected_item_id],
-                    "qty": int(qty),
-                })
-            st.success("Added to reservation cart.")
-            st.rerun()
-
-        st.subheader("Reservation cart")
-        if not st.session_state.res_cart:
-            st.info("Cart is empty.")
-        else:
-            cart_df = pd.DataFrame([{"item": c["item_label"], "qty": c["qty"]} for c in st.session_state.res_cart])
-            st.dataframe(cart_df, use_container_width=True, hide_index=True)
-
-            colx, coly = st.columns([1, 1], gap="large")
-            with colx:
-                if st.button("Clear reservation cart", use_container_width=True):
-                    st.session_state.res_cart = []
-                    st.rerun()
-            with coly:
-                remove_idx = st.number_input("Remove line # (1..n)", min_value=1, step=1, value=1, max_value=len(st.session_state.res_cart))
-                if st.button("Remove line", use_container_width=True):
-                    idx = int(remove_idx) - 1
-                    if 0 <= idx < len(st.session_state.res_cart):
-                        st.session_state.res_cart.pop(idx)
-                        st.rerun()
-
-        st.divider()
-        notes = st.text_area("Notes (optional)", key="res_notes")
-
-        if st.button("Create reservation", type="primary", use_container_width=True):
-            if not r_name.strip():
-                st.error("Name is required.")
-                return
-            if not r_email.strip():
-                st.error("Email is required.")
-                return
-            if not r_group.strip():
-                st.error("Group/organization is required.")
-                return
-            if expected_return_date < est_checkout_date:
-                st.error("Check-In Date cannot be before Check-Out Date.")
-                return
-            if not st.session_state.res_cart:
-                st.error("Add at least one item to the reservation cart.")
-                return
-
-            reservation_id = execute("""
-                INSERT INTO reservations (
-                    borrower_name, borrower_email, borrower_group,
-                    est_checkout_date, est_checkout_time, expected_return_date,
-                    status, notes,
-                    created_by, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?)
-            """, (
-                r_name.strip(),
-                r_email.strip(),
-                r_group.strip(),
-                est_checkout_date.isoformat(),
-                est_time_str,
-                expected_return_date.isoformat(),
-                notes.strip() or None,
-                st.session_state.user_id,
-                now_iso()
-            ))
-
-            params = []
-            for c in st.session_state.res_cart:
-                params.append((reservation_id, c["item_id"], int(c["qty"])))
-            execute_many("""
-                INSERT INTO reservation_lines (reservation_id, item_id, qty)
-                VALUES (?, ?, ?)
-            """, params)
-
-            st.session_state.res_cart = []
-            st.success(f"Reservation created (Reservation #: {reservation_id}).")
-            st.rerun()
+    # Staff can ALSO create a reservation (with counts shown)
+    st.subheader("Create reservation (staff)")
+    _reservation_create_ui(
+        show_inventory_counts=True,
+        created_by_user_id=int(st.session_state.user_id),
+        session_prefix="staff"
+    )
 
     st.divider()
-
-    # -----------------------------
-    # View / manage reservations
-    # -----------------------------
     st.subheader("Manage reservations")
 
-    # Filter
     colF1, colF2 = st.columns([1, 2], gap="large")
     with colF1:
         status_filter = st.selectbox("Status filter", ["(all)"] + RES_STATUS, index=0, key="res_status_filter")
@@ -1617,7 +1663,6 @@ def page_reservations():
     st.divider()
     st.subheader("Reservation details (expand)")
 
-    # Expanders (newest first)
     for r in data:
         rid = int(r["reservation_id"])
         label = f"Reservation #{rid} — {r['borrower_name']} — {r['borrower_group']} (Status: {r['status']})"
@@ -1635,7 +1680,6 @@ def page_reservations():
 
             st.divider()
 
-            # Update status
             current_status = r["status"]
             status_idx = RES_STATUS.index(current_status) if current_status in RES_STATUS else 0
 
@@ -1653,7 +1697,6 @@ def page_reservations():
                     st.success("Status updated.")
                     st.rerun()
 
-            # Convert to checkout
             if r.get("checkout_id"):
                 st.info(f"Already converted to Ticket #{r['checkout_id']}.")
                 pdf_bytes = build_ticket_pdf(int(r["checkout_id"]))
@@ -1695,7 +1738,6 @@ def page_reservations():
                     actual_time_str = t2.strftime("%H:%M")
 
             if st.button("Convert reservation to checkout", type="primary", use_container_width=True, key=f"res_convert_{rid}"):
-                # Pull full reservation header + lines fresh
                 header = fetch_one("SELECT * FROM reservations WHERE id=?", (rid,))
                 if not header:
                     st.error("Reservation not found.")
@@ -1705,7 +1747,6 @@ def page_reservations():
                     st.error("Reservation has no items.")
                     return
 
-                # Validate availability NOW (since reservation doesn't reserve stock)
                 for ln in lines:
                     need = int(ln["qty"] or 0)
                     avail = get_available_qty(int(ln["item_id"]))
@@ -1737,7 +1778,6 @@ def page_reservations():
                     VALUES (?, ?, ?)
                 """, params)
 
-                # Mark reservation converted + store actual checkout date/time + link ticket
                 execute("""
                     UPDATE reservations
                     SET status='converted',
@@ -1760,7 +1800,6 @@ def page_reservations():
 # ---------------------------
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
-
     init_db()
 
     st.session_state.setdefault("logged_in", False)
@@ -1770,10 +1809,21 @@ def main():
 
     render_sidebar_logo()
 
+    # Public navigation (not logged in)
     if not st.session_state.logged_in:
-        page_login()
+        with st.sidebar:
+            st.markdown(f"### {APP_TITLE}")
+            st.write("You are browsing as **Guest**")
+            st.divider()
+            choice = st.radio("Navigation", ["Make a Reservation", "Staff Login"], label_visibility="collapsed")
+
+        if choice == "Make a Reservation":
+            page_make_reservation_guest()
+        else:
+            page_login()
         return
 
+    # Staff navigation (logged in)
     with st.sidebar:
         st.markdown(f"### {APP_TITLE}")
         st.write(f"Logged in as **{st.session_state.username}** ({st.session_state.role})")
@@ -1803,7 +1853,7 @@ def main():
     elif choice == "Logout":
         page_logout()
     elif choice == "Reservations":
-        page_reservations()
+        page_reservations_staff()
 
 if __name__ == "__main__":
     main()
