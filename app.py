@@ -1574,7 +1574,7 @@ def page_make_reservation_guest():
     st.header("Make a Reservation")
     st.caption("Guests can create reservations here. Staff will review the queue and confirm availability.")
     def _submit_reservation_from_state(*, created_by_user_id: int, session_prefix: str):
-    cart_key = f"{session_prefix}_res_cart"
+        cart_key = f"{session_prefix}_res_cart"
 
     r_name = st.session_state.get(f"{session_prefix}_res_name", "")
     r_email = st.session_state.get(f"{session_prefix}_res_email", "")
