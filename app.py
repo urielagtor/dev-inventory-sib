@@ -1638,6 +1638,7 @@ def _reservation_create_ui(
                 st.rerun()
 
 
+
 def page_make_reservation_guest():
     st.header("Make a Reservation")
     st.caption("Guests can create reservations here. Staff will review the queue and confirm availability.")
@@ -1652,6 +1653,7 @@ def page_make_reservation_guest():
     st.subheader("Submit")
     if st.button("Place Reservation", type="primary", use_container_width=True, key="guest_place_reservation"):
         _submit_reservation_from_state(created_by_user_id=get_public_user_id(), session_prefix="guest")
+
 
 
 def page_reservations_staff():
