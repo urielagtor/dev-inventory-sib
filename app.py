@@ -6,6 +6,9 @@ import secrets
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 import pandas as pd
+import base64
+import streamlit.components.v1 as components
+
 
 # ✅ PDF
 from io import BytesIO
@@ -78,6 +81,39 @@ def reset_admin_password_to_default():
 # ---------------------------
 # PDF helpers
 # ---------------------------
+
+def render_pdf_inline(pdf_bytes: bytes, height: int = 750):
+    if not pdf_bytes:
+        st.warning("No PDF available to display.")
+        return
+    b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+    html = f"""
+        <iframe
+            src="data:application/pdf;base64,{b64}"
+            width="100%"
+            height="{height}"
+            style="border: 1px solid #ddd; border-radius: 8px;"
+        ></iframe>
+    """
+    components.html(html, height=height, scrolling=True)
+
+def pdf_actions(label: str, pdf_bytes: bytes, filename: str, key_prefix: str):
+    col1, col2 = st.columns([1, 1], gap="large")
+    with col1:
+        show = st.button(f"{label} Details", use_container_width=True, key=f"{key_prefix}_details")
+    with col2:
+        st.download_button(
+            f"Download {label} (PDF)",
+            data=pdf_bytes,
+            file_name=filename,
+            mime="application/pdf",
+            use_container_width=True,
+            key=f"{key_prefix}_download"
+        )
+    if show:
+        st.subheader(f"{label} (On-screen)")
+        render_pdf_inline(pdf_bytes, height=800)
+
 def build_table_pdf(title: str, subtitle_lines: list[str], table_data, col_widths=None) -> bytes:
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
