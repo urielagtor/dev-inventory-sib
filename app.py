@@ -1414,6 +1414,73 @@ def page_logout():
 # ---------------------------
 # Reservations (split: guest create vs staff manage)
 # ---------------------------
+def _submit_reservation_from_state(*, created_by_user_id: int, session_prefix: str):
+    cart_key = f"{session_prefix}_res_cart"
+
+    r_name = st.session_state.get(f"{session_prefix}_res_name", "")
+    r_email = st.session_state.get(f"{session_prefix}_res_email", "")
+    r_group = st.session_state.get(f"{session_prefix}_res_group", "")
+    est_checkout_date = st.session_state.get(f"{session_prefix}_res_est_checkout_date", date.today())
+    expected_return_date = st.session_state.get(f"{session_prefix}_res_expected_return_date", date.today())
+    notes = st.session_state.get(f"{session_prefix}_res_notes", "")
+
+    specify_time = st.session_state.get(f"{session_prefix}_res_specify_time", False)
+    est_time_str = None
+    if specify_time:
+        t = st.session_state.get(f"{session_prefix}_res_est_time", None)
+        if t:
+            try:
+                est_time_str = t.strftime("%H:%M")
+            except Exception:
+                est_time_str = None
+
+    cart = st.session_state.get(cart_key, [])
+
+    if not str(r_name).strip():
+        st.error("Name is required.")
+        return
+    if not str(r_email).strip():
+        st.error("Email is required.")
+        return
+    if not str(r_group).strip():
+        st.error("Group/organization is required.")
+        return
+    if expected_return_date < est_checkout_date:
+        st.error("Check-In Date cannot be before Check-Out Date.")
+        return
+    if not cart:
+        st.error("Add at least one item to the reservation cart.")
+        return
+
+    reservation_id = execute("""
+        INSERT INTO reservations (
+            borrower_name, borrower_email, borrower_group,
+            est_checkout_date, est_checkout_time, expected_return_date,
+            status, notes,
+            created_by, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?)
+    """, (
+        str(r_name).strip(),
+        str(r_email).strip(),
+        str(r_group).strip(),
+        est_checkout_date.isoformat(),
+        est_time_str,
+        expected_return_date.isoformat(),
+        str(notes).strip() or None,
+        int(created_by_user_id),
+        now_iso()
+    ))
+
+    params = [(reservation_id, int(c["item_id"]), int(c["qty"])) for c in cart]
+    execute_many("""
+        INSERT INTO reservation_lines (reservation_id, item_id, qty)
+        VALUES (?, ?, ?)
+    """, params)
+
+    st.session_state[cart_key] = []
+    st.success(f"Reservation created (Reservation #: {reservation_id}).")
+    st.rerun()
+
 def _reservation_create_ui(
     *,
     show_inventory_counts: bool,
@@ -1606,72 +1673,7 @@ def _reservation_create_ui(
             st.success(f"Reservation created (Reservation #: {reservation_id}).")
             st.rerun()
 
-            def _submit_reservation_from_state(*, created_by_user_id: int, session_prefix: str):
-                cart_key = f"{session_prefix}_res_cart"
-
-                r_name = st.session_state.get(f"{session_prefix}_res_name", "")
-                r_email = st.session_state.get(f"{session_prefix}_res_email", "")
-                r_group = st.session_state.get(f"{session_prefix}_res_group", "")
-                est_checkout_date = st.session_state.get(f"{session_prefix}_res_est_checkout_date", date.today())
-                expected_return_date = st.session_state.get(f"{session_prefix}_res_expected_return_date", date.today())
-                notes = st.session_state.get(f"{session_prefix}_res_notes", "")
-
-                specify_time = st.session_state.get(f"{session_prefix}_res_specify_time", False)
-                est_time_str = None
-                if specify_time:
-                    t = st.session_state.get(f"{session_prefix}_res_est_time", None)
-                    if t:
-                        try:
-                            est_time_str = t.strftime("%H:%M")
-                        except Exception:
-                            est_time_str = None
-
-                cart = st.session_state.get(cart_key, [])
-
-                if not str(r_name).strip():
-                    st.error("Name is required.")
-                    return
-                if not str(r_email).strip():
-                    st.error("Email is required.")
-                    return
-                if not str(r_group).strip():
-                    st.error("Group/organization is required.")
-                    return
-                if expected_return_date < est_checkout_date:
-                    st.error("Check-In Date cannot be before Check-Out Date.")
-                    return
-                if not cart:
-                    st.error("Add at least one item to the reservation cart.")
-                    return
-
-                reservation_id = execute("""
-                    INSERT INTO reservations (
-                        borrower_name, borrower_email, borrower_group,
-                        est_checkout_date, est_checkout_time, expected_return_date,
-                        status, notes,
-                        created_by, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?)
-                """, (
-                    str(r_name).strip(),
-                    str(r_email).strip(),
-                    str(r_group).strip(),
-                    est_checkout_date.isoformat(),
-                    est_time_str,
-                    expected_return_date.isoformat(),
-                    str(notes).strip() or None,
-                    int(created_by_user_id),
-                    now_iso()
-                ))
-
-                params = [(reservation_id, int(c["item_id"]), int(c["qty"])) for c in cart]
-                execute_many("""
-                    INSERT INTO reservation_lines (reservation_id, item_id, qty)
-                    VALUES (?, ?, ?)
-                """, params)
-
-                st.session_state[cart_key] = []
-                st.success(f"Reservation created (Reservation #: {reservation_id}).")
-                st.rerun()
+            
 
 
 
