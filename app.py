@@ -877,7 +877,7 @@ def page_checkout():
             mime="application/pdf",
             use_container_width=True,
         )
-        st.caption("Tip: Open the downloaded PDF and print it from your browser/PDF viewer.")
+        st.caption("You can view the ticket on-screen (Details) or download it as a PDF.")
 
         colA, colB = st.columns([1, 1], gap="large")
         with colA:
@@ -1160,14 +1160,12 @@ def page_checkin():
     if header["actual_return_date"]:
         st.info(f"Ticket #{ticket_id} is already CLOSED (Actual return: {header['actual_return_date']}).")
         pdf_bytes = build_ticket_pdf(ticket_id)
-        st.download_button(
-            "Download / Print Ticket (PDF)",
-            data=pdf_bytes,
-            file_name=f"ticket_{ticket_id}.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-            key=f"print_closed_from_checkin_{ticket_id}"
-        )
+        pdf_actions(
+            label_prefix="Ticket",
+            pdf_bytes=rec["pdf_bytes"],
+            filename=f"ticket_{rec['checkout_id']}.pdf",
+            details_key=f"checkout_ticket_{rec['checkout_id']}"
+                    )
         return
 
     st.subheader(f"Ticket #{ticket_id}")
@@ -1291,13 +1289,11 @@ def page_checkin():
             st.success(f"Return processed. Ticket #{ticket_id} remains OPEN — {remain_qty} still outstanding.")
 
         pdf_bytes = build_ticket_pdf(ticket_id)
-        st.download_button(
-            "Download / Print Updated Ticket (PDF)",
-            data=pdf_bytes,
-            file_name=f"ticket_{ticket_id}.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-            key=f"print_updated_ticket_after_checkin_{ticket_id}"
+        pdf_actions(
+            label_prefix="Ticket",
+            pdf_bytes=rec["pdf_bytes"],
+            filename=f"ticket_{rec['checkout_id']}.pdf",
+            details_key=f"converted_ticket_{rec['checkout_id']}"
         )
 
         st.rerun()
@@ -1318,14 +1314,13 @@ def page_reports():
                 st.error(f"Ticket #{tid} not found.")
             else:
                 pdf_bytes = build_ticket_pdf(tid)
-                st.download_button(
-                    "Download / Print Ticket (PDF)",
-                    data=pdf_bytes,
-                    file_name=f"ticket_{tid}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True,
-                    key=f"report_print_ticket_{tid}"
+                pdf_actions(
+                    label_prefix=f"Ticket #{ticket_id}",
+                    pdf_bytes=pdf_bytes,
+                    filename=f"ticket_{ticket_id}.pdf",
+                    details_key=f"open_ticket_{ticket_id}"
                 )
+
 
     st.divider()
     st.subheader("Inventory snapshot")
