@@ -1570,11 +1570,8 @@ def _reservation_create_ui(
             st.success(f"Reservation created (Reservation #: {reservation_id}).")
             st.rerun()
 
-def page_make_reservation_guest():
-    st.header("Make a Reservation")
-    st.caption("Guests can create reservations here. Staff will review the queue and confirm availability.")
-    def _submit_reservation_from_state(*, created_by_user_id: int, session_prefix: str):
-        cart_key = f"{session_prefix}_res_cart"
+            def _submit_reservation_from_state(*, created_by_user_id: int, session_prefix: str):
+                cart_key = f"{session_prefix}_res_cart"
 
     r_name = st.session_state.get(f"{session_prefix}_res_name", "")
     r_email = st.session_state.get(f"{session_prefix}_res_email", "")
@@ -1595,7 +1592,6 @@ def page_make_reservation_guest():
 
     cart = st.session_state.get(cart_key, [])
 
-    # Validation
     if not str(r_name).strip():
         st.error("Name is required.")
         return
@@ -1631,10 +1627,7 @@ def page_make_reservation_guest():
         now_iso()
     ))
 
-    params = []
-    for c in cart:
-        params.append((reservation_id, int(c["item_id"]), int(c["qty"])))
-
+    params = [(reservation_id, int(c["item_id"]), int(c["qty"])) for c in cart]
     execute_many("""
         INSERT INTO reservation_lines (reservation_id, item_id, qty)
         VALUES (?, ?, ?)
@@ -1644,11 +1637,22 @@ def page_make_reservation_guest():
     st.success(f"Reservation created (Reservation #: {reservation_id}).")
     st.rerun()
 
+
+def page_make_reservation_guest():
+    st.header("Make a Reservation")
+    st.caption("Guests can create reservations here. Staff will review the queue and confirm availability.")
+
     _reservation_create_ui(
         show_inventory_counts=False,
         created_by_user_id=get_public_user_id(),
         session_prefix="guest"
     )
+
+    st.divider()
+    st.subheader("Submit")
+    if st.button("Place Reservation", type="primary", use_container_width=True, key="guest_place_reservation"):
+        _submit_reservation_from_state(created_by_user_id=get_public_user_id(), session_prefix="guest")
+
 
 def page_reservations_staff():
     require_login()
